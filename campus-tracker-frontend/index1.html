@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Campus Tracker Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #8b5cf6; /* Vibrant Purple */
+            --primary-dark: #7c3aed;
+            --background: #111827; /* Darker Blue-Gray */
+            --card-bg: #1f2937;
+            --text-light: #f3f4f6;
+            --accent: #10b981; /* Green Accent */
+        }
+        body {
+            font-family: 'Poppins', sans-serif;
+            background-color: var(--background);
+            color: var(--text-light);
+        }
+        .tab-button {
+            transition: all 0.2s;
+            border-bottom: 3px solid transparent;
+        }
+        .tab-button.active {
+            border-color: var(--primary);
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid #374151;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .scroll-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        /* Style for primary button */
+        .btn-primary {
+            background-color: var(--primary);
+            transition: background-color 0.15s;
+        }
+        .btn-primary:hover {
+            background-color: var(--primary-dark);
+        }
+        /* Status styling */
+        .status-Active { background-color: var(--accent); color: white; }
+        .status-Maintenance { background-color: #f59e0b; color: white; } /* Amber */
+        .status-Offline { background-color: #ef4444; color: white; } /* Red */
+    </style>
+</head>
+<body class="min-h-screen">
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-8 p-4 rounded-lg bg-gray-900/50">
+            <h1 class="text-4xl font-extrabold text-primary-300 text-center">Campus Tracker Admin Panel</h1>
+            <p class="text-center text-gray-400 mt-1">Manage all operations: Trips, Shuttles, and Users.</p>
+        </header>
+
+        <div class="flex border-b border-gray-700 mb-6 space-x-6 overflow-x-auto">
+            <button id="tab-active" class="tab-button px-4 py-3 text-lg" onclick="setView('active')">
+                Active Trips
+            </button>
+            <button id="tab-logs" class="tab-button px-4 py-3 text-lg" onclick="setView('logs')">
+                Trip Log Manager
+            </button>
+            <button id="tab-shuttles" class="tab-button px-4 py-3 text-lg" onclick="setView('shuttles')">
+                Shuttle Management
+            </button>
+            <button id="tab-users" class="tab-button px-4 py-3 text-lg" onclick="setView('users')">
+                User Management
+            </button>
+        </div>
+
+        <div id="content-area" class="min-h-[500px]">
+        </div>
+
+        <div id="message-box" class="fixed bottom-4 right-4 p-4 rounded-xl shadow-2xl z-50 text-white hidden" role="alert"></div>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8080/api';
+        let currentView = 'active';
+        let selectedTripId = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            setView(currentView);
+            // Auto-refresh active trips every 10 seconds
+            setInterval(() => {
+                if (currentView === 'active') fetchActiveTrips();
+            }, 10000);
+        });
+
+        // --- UI UTILITIES ---
+
+        function showMessage(message, type = 'success') {
+            const box = document.getElementById('message-box');
+            box.textContent = message;
+            box.classList.remove('hidden', 'bg-green-600', 'bg-red-600', 'bg-yellow-600');
+            
+            if (type === 'success') box.classList.add('bg-green-600');
+            else if (type === 'error') box.classList.add('bg-red-600');
+            else box.classList.add('bg-yellow-600');
+
+            box.classList.remove('hidden');
+
+            setTimeout(() => {
+                box.classList.add('hidden');
+            }, 5000);
+        }
+
+        function setView(view, tripId = null) {
+            currentView = view;
+            selectedTripId = tripId;
+
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            // The split is for the case where view is 'logs-detail'
+            document.getElementById(`tab-${view.split('-')[0]}`).classList.add('active');
+            
+            if (view === 'active') fetchActiveTrips();
+            else if (view === 'logs' || view === 'logs-list') fetchAllTripsForLogManager(); // FIX: Use generic endpoint
+            else if (view === 'logs-detail' && tripId) fetchTripLogs(tripId);
+            else if (view === 'shuttles') fetchShuttles();
+            else if (view === 'users') fetchUsers();
+        }
+
+        // --- API HELPERS ---
+
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/${endpoint}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                // Check for empty body (e.g., 204 No Content)
+                if (response.status === 204) return [];
+                const data = await response.json();
+                // Ensure data is an array for list endpoints if the API returns null
+                if (!Array.isArray(data) && (endpoint.includes('trips') || endpoint.includes('shuttles') || endpoint.includes('users'))) {
+                    return data ? [data] : [];
+                }
+                return data;
+            } catch (error) {
+                // Do not show error for reports/active-trips if it fails, as we assume it's custom.
+                if (!endpoint.includes('reports/active-trips')) {
+                     showMessage(`Error fetching ${endpoint}: ${error.message}. Check CORS/Backend`, 'error');
+                }
+                return null;
+            }
+        }
+
+        async function postOrPutData(endpoint, data, method = 'POST') {
+            try {
+                const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
+                    method: method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                });
+                
+                // 201 Created and 200 OK are success codes
+                if (response.status === 201 || response.status === 200) {
+                    showMessage(`${method === 'POST' ? 'Created' : 'Updated'} successfully!`, 'success');
+                    return await response.json();
+                } else {
+                    const errorText = await response.text();
+                    throw new Error(`Failed: ${response.status} - ${errorText.substring(0, 100)}...`);
+                }
+            } catch (error) {
+                showMessage(`Submission Error: ${error.message}`, 'error');
+                return null;
+            }
+        }
+
+        // --- 1. ACTIVE TRIPS VIEW (TRIP) ---
+        
+        async function fetchActiveTrips() {
+            // NOTE: Assuming '/reports/active-trips' endpoint is correctly implemented in TripController
+            const trips = await fetchData('reports/active-trips');
+            const contentArea = document.getElementById('content-area');
+            let html = `
+                <h2 class="text-2xl font-bold mb-4 text-primary-400">Ongoing Trips (${trips ? trips.length : 0})</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            `;
+            
+            if (!trips || trips.length === 0) {
+                html += '<p class="col-span-4 text-center py-10 text-gray-500 card p-6 rounded-xl">No trips are currently marked as "Ongoing".</p>';
+            } else {
+                trips.forEach(trip => {
+                    const startTime = trip.startTime ? new Date(`2000/01/01 ${trip.startTime}`).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'N/A';
+                    const endTime = trip.endTime ? new Date(`2000/01/01 ${trip.endTime}`).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'N/A';
+                    
+                    html += `
+                        <div class="card p-5 rounded-xl flex flex-col justify-between">
+                            <div>
+                                <h3 class="text-xl font-bold text-white mb-2">Trip ID: ${trip.tripId}</h3>
+                                <p class="text-sm text-gray-400 mb-1">Date: ${trip.tripDate || 'N/A'}</p>
+                                <p class="text-sm text-gray-400 mb-4">Time: ${startTime} - ${endTime}</p>
+                                <span class="bg-accent/20 text-accent text-xs font-semibold px-3 py-1 rounded-full">${trip.currentStatus || 'N/A'}</span>
+                            </div>
+                            <button 
+                                class="mt-4 w-full btn-primary text-white font-semibold py-2 px-4 rounded-lg"
+                                onclick="setView('logs-detail', ${trip.tripId})">
+                                Manage Logs →
+                            </button>
+                        </div>
+                    `;
+                });
+            }
+
+            html += '</div>';
+            contentArea.innerHTML = html;
+        }
+
+        // --- 2. TRIP LOGS VIEW (TRIPLOG - New List View Logic with FIX) ---
+        
+        // FIX: Fetch all trips and filter locally to avoid 404 on reports/past-trips
+        async function fetchAllTripsForLogManager() {
+            // Assumes a standard GET /api/trips endpoint exists and works
+            const allTrips = await fetchData('trips'); 
+            
+            // Filter trips that are likely "past" or "completed"
+            // You should adjust the condition based on your backend's trip status logic
+            const pastTrips = allTrips ? allTrips.filter(trip => trip.currentStatus && trip.currentStatus.toLowerCase() !== 'ongoing') : [];
+            
+            renderPastTrips(pastTrips);
+        }
+
+        function renderPastTrips(trips) {
+            const contentArea = document.getElementById('content-area');
+            let tripList = '<p class="col-span-1 text-center py-10 text-gray-500 card p-6 rounded-xl">No past trips available to view logs.</p>';
+
+            if (trips && trips.length > 0) {
+                tripList = trips.map(trip => {
+                    const startTime = trip.startTime ? new Date(`2000/01/01 ${trip.startTime}`).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'N/A';
+                    const endTime = trip.endTime ? new Date(`2000/01/01 ${trip.endTime}`).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'N/A';
+
+                    return `
+                        <div class="card p-4 rounded-lg flex items-center justify-between">
+                            <div>
+                                <p class="text-lg font-semibold text-white">Trip ID: ${trip.tripId}</p>
+                                <p class="text-sm text-gray-400">Route: ${trip.route || 'N/A'} | Date: ${trip.tripDate || 'N/A'}</p>
+                                <p class="text-xs text-gray-500">Time: ${startTime} - ${endTime} | Status: ${trip.currentStatus || 'Completed'}</p>
+                            </div>
+                            <button 
+                                class="btn-primary text-white font-semibold py-1 px-4 rounded-lg text-sm"
+                                onclick="setView('logs-detail', ${trip.tripId})">
+                                View Logs
+                            </button>
+                        </div>
+                    `;
+                }).join('<div class="h-px bg-gray-700 my-2"></div>');
+            }
+
+            contentArea.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-primary-400">Trip Log Manager: Select a Trip</h2>
+                <div class="card p-6 rounded-xl shadow-xl">
+                    <h3 class="text-xl font-semibold mb-4">Past & Completed Trips (${trips ? trips.length : 0})</h3>
+                    <div class="scroll-container space-y-3">
+                        ${tripList}
+                    </div>
+                </div>
+            `;
+        }
+
+
+        // --- 2. TRIP LOGS VIEW (TRIPLOG - Detail View Logic) ---
+
+        async function fetchTripLogs(tripId) {
+            // NOTE: Assumes '/trips/{tripId}/logs' endpoint is correctly implemented
+            const logs = await fetchData(`trips/${tripId}/logs`);
+            if (logs) {
+                renderTripLogs(tripId, logs);
+            }
+        }
+
+        function renderTripLogs(tripId, logs) {
+            const contentArea = document.getElementById('content-area');
+            
+            let logRows = logs.map(log => {
+                const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleTimeString('en-US') + ' ' + new Date(log.timestamp).toLocaleDateString() : 'N/A';
+                const userIdDisplay = log.user && log.user.userId ? log.user.userId : 'N/A';
+                
+                let actionColor = 'bg-gray-600';
+                if (log.action === 'Boarding') actionColor = 'bg-green-600';
+                else if (log.action === 'Alighting') actionColor = 'bg-yellow-600';
+                else if (log.action === 'Completed') actionColor = 'bg-red-600';
+
+                return `
+                    <tr class="border-b border-gray-700 hover:bg-gray-700">
+                        <td class="p-4 text-sm">${log.logId || 'N/A'}</td>
+                        <td class="p-4">
+                            <span class="px-3 py-1 text-xs font-medium rounded-full ${actionColor}">${log.action || 'N/A'}</span>
+                        </td>
+                        <td class="p-4 text-sm">${userIdDisplay}</td>
+                        <td class="p-4 text-sm">${timestamp}</td>
+                        <td class="p-4 text-gray-400 text-sm">${log.remarks || '-'}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            contentArea.innerHTML = `
+                <button class="text-primary-300 mb-4 flex items-center hover:text-primary-400 transition" onclick="setView('logs')">
+                    ← Back to Trip List
+                </button>
+
+                <h2 class="text-2xl font-bold mb-6">Log Manager (Trip ID: ${tripId})</h2>
+                
+                <div class="card p-6 rounded-xl shadow-xl mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-white">Add New Log Entry</h3>
+                    <form id="add-log-form" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div class="md:col-span-1">
+                            <label for="action" class="block text-sm font-medium mb-1 text-gray-300">Action Type</label>
+                            <select id="action" name="action" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                                <option value="Boarding">Boarding</option>
+                                <option value="Alighting">Alighting</option>
+                                <option value="StatusUpdate">Status Update</option>
+                                <option value="Completed">Trip Completed</option>
+                            </select>
+                        </div>
+                        <div class="md:col-span-1">
+                            <label for="userId" class="block text-sm font-medium mb-1 text-gray-300">User ID (Passenger/Driver)</label>
+                            <input type="number" id="userId" name="userId" placeholder="e.g., 1 (Optional for Status)" class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label for="remarks" class="block text-sm font-medium mb-1 text-gray-300">Remarks (Optional)</label>
+                            <input type="text" id="remarks" name="remarks" placeholder="Optional note on status or location" class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                        </div>
+                        <div class="md:col-span-4 flex justify-end">
+                            <button type="submit" class="btn-primary hover:bg-primary-dark text-white font-bold py-2 px-6 rounded-lg transition duration-150">
+                                Submit Log
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                
+                <div class="card p-6 rounded-xl shadow-xl">
+                    <h3 class="text-xl font-semibold mb-4">All Logs (${logs ? logs.length : 0})</h3>
+                    <div class="scroll-container overflow-x-auto">
+                        <table class="min-w-full table-auto">
+                            <thead>
+                                <tr class="text-left text-gray-400 uppercase text-xs border-b border-gray-600">
+                                    <th class="p-4">Log ID</th>
+                                    <th class="p-4">Action</th>
+                                    <th class="p-4">User ID</th>
+                                    <th class="p-4">Timestamp</th>
+                                    <th class="p-4">Remarks</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-800">
+                                ${logRows || '<tr><td colspan="5" class="p-4 text-center text-gray-500">No log entries found for this trip.</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            
+            // Attach event listener to the form
+            document.getElementById('add-log-form').addEventListener('submit', (e) => handleLogSubmission(e, tripId));
+        }
+
+        async function handleLogSubmission(e, tripId) {
+            e.preventDefault();
+            
+            const action = document.getElementById('action').value;
+            const userIdInput = document.getElementById('userId').value;
+            const remarks = document.getElementById('remarks').value;
+
+            const payload = {
+                action: action,
+                remarks: remarks,
+            };
+            
+            // Only include the user field if a userId was provided
+            if (userIdInput) {
+                // NOTE: Assuming User ID is a Long/Integer on the backend
+                payload.user = { userId: parseInt(userIdInput) }; 
+            }
+
+            const savedLog = await postOrPutData(`trips/${tripId}/logs`, payload, 'POST');
+            
+            if (savedLog) {
+                fetchTripLogs(tripId); // Refresh the logs view
+            }
+        }
+        
+        // --- 3. SHUTTLE MANAGEMENT VIEW (SHUTTLE) ---
+        
+        async function fetchShuttles() {
+            const shuttles = await fetchData('shuttles'); 
+            renderShuttles(shuttles);
+        }
+
+        function renderShuttles(shuttles) {
+            const contentArea = document.getElementById('content-area');
+            let shuttleList = '<p class="text-center text-gray-500 py-10">No shuttles found or API is not reachable.</p>';
+            
+            if (shuttles && shuttles.length > 0) {
+                shuttleList = shuttles.map(shuttle => `
+                    <div class="card p-4 rounded-lg flex flex-col sm:flex-row items-start sm:items-center justify-between">
+                        <div class="mb-2 sm:mb-0">
+                            <p class="text-lg font-semibold text-white">Shuttle #${shuttle.shuttleNumber || 'N/A'}</p>
+                            <p class="text-sm text-gray-400">Route: ${shuttle.route || 'Unknown Route'} | Capacity: ${shuttle.capacity || 'N/A'}</p>
+                            <p class="text-xs text-gray-500">ID: ${shuttle.shuttleId}</p>
+                        </div>
+                        <span class="${shuttle.status === 'Active' ? 'bg-accent/20 text-accent' : shuttle.status === 'Maintenance' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-red-500/20 text-red-400'} text-xs px-3 py-1 rounded-full font-medium">${shuttle.status || 'Unknown'}</span>
+                    </div>
+                `).join('');
+            }
+
+            contentArea.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-primary-400">Shuttle Management</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">Add New Shuttle</h3>
+                        <form id="add-shuttle-form">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div class="mb-2">
+                                    <label class="block text-sm font-medium mb-1">Shuttle Number</label>
+                                    <input type="text" name="shuttleNumber" placeholder="e.g., S001" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                                </div>
+                                <div class="mb-2">
+                                    <label class="block text-sm font-medium mb-1">Capacity</label>
+                                    <input type="number" name="capacity" placeholder="e.g., 40" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                                </div>
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium mb-1">Route</label>
+                                <input type="text" name="route" placeholder="e.g., Main Campus Loop" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium mb-1">Initial Status</label>
+                                <select name="status" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                                    <option value="Active">Active</option>
+                                    <option value="Maintenance">Maintenance</option>
+                                    <option value="Offline">Offline</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="w-full btn-primary text-white font-bold py-2 rounded-lg">Add Shuttle</button>
+                        </form>
+                    </div>
+
+                    <div class="card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">All Shuttles (${shuttles ? shuttles.length : 0})</h3>
+                        <div class="scroll-container space-y-3">
+                            ${shuttleList}
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Attach the new submission handler
+            document.getElementById('add-shuttle-form').addEventListener('submit', handleShuttleSubmission);
+        }
+
+        async function handleShuttleSubmission(e) {
+            e.preventDefault();
+            const form = e.target;
+
+            const payload = {
+                shuttleNumber: form.shuttleNumber.value,
+                capacity: parseInt(form.capacity.value),
+                route: form.route.value,
+                status: form.status.value,
+            };
+
+            // Call the backend endpoint to add the shuttle
+            const savedShuttle = await postOrPutData('shuttles', payload, 'POST');
+
+            if (savedShuttle) {
+                form.reset();
+                fetchShuttles(); // Refresh the shuttle list
+            }
+        }
+
+        // --- 4. USER MANAGEMENT VIEW (USER) ---
+
+        async function fetchUsers() {
+            // NOTE: Assumes '/users' endpoint is correctly implemented
+            const users = await fetchData('users'); 
+            renderUsers(users);
+        }
+
+        async function handleUserSubmission(e) {
+             e.preventDefault();
+            const form = e.target;
+
+            const payload = {
+                fullName: form.fullName.value,
+                email: form.email.value,
+                // Assuming default role/password is handled by backend or is not needed for this form
+            };
+
+            // Assuming a POST to /api/users to create a new user
+            const savedUser = await postOrPutData('users', payload, 'POST');
+
+            if (savedUser) {
+                form.reset();
+                fetchUsers(); // Refresh the user list
+            }
+        }
+
+        function renderUsers(users) {
+            const contentArea = document.getElementById('content-area');
+            let userList = '<p class="text-center text-gray-500 py-10">User API not fully integrated or no data found.</p>';
+            
+            if (users && users.length > 0) {
+                 userList = `
+                     <table class="min-w-full table-auto">
+                         <thead>
+                             <tr class="text-left text-gray-400 uppercase text-xs border-b border-gray-600">
+                                 <th class="p-4">ID</th>
+                                 <th class="p-4">Name</th>
+                                 <th class="p-4">Email</th>
+                                 <th class="p-4">Role</th>
+                             </tr>
+                         </thead>
+                         <tbody class="divide-y divide-gray-800">
+                             ${users.map(user => `
+                                 <tr class="border-b border-gray-700 hover:bg-gray-700">
+                                     <td class="p-4 text-sm">${user.userId || 'N/A'}</td>
+                                     <td class="p-4 text-sm">${user.fullName || 'N/A'}</td>
+                                     <td class="p-4 text-sm text-gray-400">${user.email || 'N/A'}</td>
+                                     <td class="p-4 text-sm">${user.role || 'Passenger'}</td>
+                                 </tr>
+                             `).join('')}
+                         </tbody>
+                     </table>
+                     <p class="text-xs text-gray-500 pt-2">Note: User list reflects data from the backend /api/users endpoint.</p>
+                 `;
+            }
+
+            contentArea.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-primary-400">User Management</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">Add New User</h3>
+                        <form id="add-user-form">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium mb-1">Full Name</label>
+                                <input type="text" name="fullName" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium mb-1">Email</label>
+                                <input type="email" name="email" required class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-primary focus:border-primary">
+                            </div>
+                            <button type="submit" class="w-full btn-primary text-white font-bold py-2 rounded-lg">Add User</button>
+                        </form>
+                    </div>
+
+                    <div class="card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">All Users (${users ? users.length : 0})</h3>
+                        <div class="scroll-container">
+                            ${userList}
+                        </div>
+                    </div>
+                </div>
+            `;
+            // Attach user submission handler
+            document.getElementById('add-user-form').addEventListener('submit', handleUserSubmission);
+        }
+
+    </script>
+</body>
+</html>
